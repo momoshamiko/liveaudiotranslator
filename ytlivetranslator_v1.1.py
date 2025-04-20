@@ -117,14 +117,16 @@ def capture_audio_thread(url, audio_q, gui_q):
 
 
 def transcribe_thread(audio_q, transcribed_q, gui_q):
-    """ Transcribes audio using auto-detect, puts (lang, text) in transcribed_q """
+    """ Transcribes audio: detects language initially, then locks it for the session. """
     thread_name = threading.current_thread().name
     gui_q.put(f"[{thread_name}] Initializing Whisper model ({WHISPER_MODEL_SIZE})...")
     model = None
+    detection_phase = True  # Start in detection phase
+    locked_language = None  # Language to use after detection
+
     try:
-        # Consider adding VadOptions for more control if needed: from faster_whisper.vad import VadOptions
         model = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
-        gui_q.put(f"[{thread_name}] Whisper model initialized on {WHISPER_DEVICE} ({WHISPER_COMPUTE_TYPE}). Waiting for audio...")
+        gui_q.put(f"[{thread_name}] Whisper model initialized. Detecting initial language...")
 
         while True:
             audio_data_bytes = audio_q.get()
@@ -135,24 +137,38 @@ def transcribe_thread(audio_q, transcribed_q, gui_q):
             try:
                 audio_np = np.frombuffer(audio_data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                 if audio_np.size > 0:
-                    # Auto-detect language by omitting 'language' parameter
+
+                    current_language_setting = None # Default to auto-detect in detection phase
+                    if not detection_phase:
+                        current_language_setting = locked_language # Use locked language after detection
+
                     segments, info = model.transcribe(
                         audio_np,
+                        language=current_language_setting, # Use None during detection, locked lang after
                         beam_size=5,
-                        vad_filter=True, # Use VAD to filter silence and improve segment quality
-                        vad_parameters=dict(min_silence_duration_ms=500), # Adjust VAD sensitivity
-                        # language=None, # Explicitly None or omitted for auto-detect
+                        vad_filter=True,
+                        vad_parameters=dict(min_silence_duration_ms=500),
                     )
 
-                    detected_lang = info.language # Get detected language code (e.g., 'ja', 'en')
-                    detected_prob = info.language_probability # Confidence score
-
-                    gui_q.put(f"[{thread_name}] Detected language: {detected_lang} (Prob: {detected_prob:.2f})")
-
                     full_text = " ".join(segment.text for segment in segments).strip()
-                    if full_text:
-                        # Put tuple (detected language code, transcribed text) into the queue
-                        transcribed_q.put((detected_lang, full_text))
+
+                    if detection_phase:
+                        # Still in detection phase, check if we got usable text
+                        if full_text:
+                            # First chunk with actual text detected, lock the language
+                            locked_language = info.language
+                            detection_phase = False # Exit detection phase
+                            detected_prob = info.language_probability
+                            gui_q.put(f"[{thread_name}] Initial language detected and locked: {locked_language} (Prob: {detected_prob:.2f})")
+                            # Send this first transcription result
+                            if locked_language: # Ensure language was actually detected
+                                transcribed_q.put((locked_language, full_text))
+                        # else: still detecting, wait for a chunk with text
+                    else:
+                        # Detection phase is over, use the locked language
+                        # Only put non-empty results
+                        if full_text and locked_language:
+                             transcribed_q.put((locked_language, full_text))
 
             except Exception as e:
                 gui_q.put(f"[{thread_name}] Transcription error: {e}")
@@ -161,7 +177,7 @@ def transcribe_thread(audio_q, transcribed_q, gui_q):
 
     except Exception as e:
         gui_q.put(f"[{thread_name}] CRITICAL ERROR: Failed to load Whisper model: {e}")
-        transcribed_q.put(None) # Ensure downstream knows failure occurred
+        transcribed_q.put(None)
     finally:
         gui_q.put(f"[{thread_name}] Transcription thread finished.")
         gui_q.put(None) # Signal GUI
