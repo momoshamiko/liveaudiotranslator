@@ -32,15 +32,6 @@ SUPPORTED_TARGET_LANGUAGES = {
 }
 DEFAULT_TARGET_LANG = "English" # Default selection in the dropdown
 
-# --- Ollama System Prompt for Context ---
-SYSTEM_PROMPT_CONTEXT = """You are an expert translator specializing in accurately translating short dialogue segments from Japanese Hololive VTuber live streams into the requested target language.
-- Preserve the nuance and tone where possible.
-- Be mindful of Hololive-specific terms, fan names, internet slang, and gaming terminology. Translate them appropriately or leave them in original form if they are commonly used names/terms.
-- Focus solely on providing the direct translation of the input text.
-- Do NOT add any commentary, explanations, analysis, or notes about the translation or source language."""
-
-# ... (rest of your configurations, imports, etc.)
-
 # Whisper settings
 WHISPER_MODEL_SIZE = "medium" # tiny, base, small, medium, large-v2, large-v3
 WHISPER_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -192,10 +183,11 @@ def transcribe_thread(audio_q, transcribed_q, gui_q):
         gui_q.put(None) # Signal GUI
 
 def translate_thread(transcribed_q, gui_q, target_lang_code):
-    """ Translates text using Ollama with a system prompt for context """
+    """ Translates text using Ollama with a strict main prompt """
     thread_name = threading.current_thread().name
     initial_target_display = target_lang_code if target_lang_code else "N/A"
-    gui_q.put(f"[{thread_name}] Initializing Ollama client (Model: {OLLAMA_MODEL}, Target Lang: {initial_target_display}, Using System Prompt)...")
+    # Note: System prompt context removed from this status message
+    gui_q.put(f"[{thread_name}] Initializing Ollama client (Model: {OLLAMA_MODEL}, Target Lang: {initial_target_display})...")
     try:
         ollama.list()
         gui_q.put(f"[{thread_name}] Ollama connection successful. Waiting for text...")
@@ -219,24 +211,42 @@ def translate_thread(transcribed_q, gui_q, target_lang_code):
             if text_to_translate:
                 start_time = time.time()
 
-                # *** MODIFICATION HERE: Simpler user prompt, use system prompt ***
-                # The main instructions are now in SYSTEM_PROMPT_CONTEXT
-                user_prompt = f"Translate the following text accurately to {target_lang_code}:\n\nSource Text ({source_lang_code}): {text_to_translate}\n\n{target_lang_code} Translation:"
+                # *** MODIFICATION HERE: Strict All-in-One Prompt ***
+                # Combine context (optional) and strict output instructions directly
+                context_info = "Context: The text is dialogue from a Japanese Hololive VTuber live stream." # Optional, can remove if it causes issues
+                instruction = f"Translate the following Source Text into {target_lang_code}. IMPORTANT: Your entire response must consist ONLY of the raw translated text in {target_lang_code} and absolutely nothing else. Do not add explanations, commentary, notes, labels, source language text, or translations into other languages."
+
+                # Construct the single prompt
+                prompt = f"{context_info}\n\n{instruction}\n\nSource Text ({source_lang_code}): {text_to_translate}\n\n{target_lang_code} Translation:"
+                # ******************************************************
 
                 response = ollama.generate(
                     model=OLLAMA_MODEL,
-                    prompt=user_prompt,           # Pass the text and immediate instruction
-                    system=SYSTEM_PROMPT_CONTEXT, # Pass the persistent context/instructions
-                    stream=False
-                    # options={"temperature": 0.7} # Optional: Adjust temperature if needed
+                    prompt=prompt,           # Pass the combined prompt
+                    # system=...          # REMOVED system parameter
+                    stream=False,
+                    options={"temperature": 0.5} # Optional: Lower temperature might help consistency
                 )
-                # *****************************************************************
 
                 translation = response['response'].strip()
                 latency = time.time() - start_time
 
                 if translation:
-                    gui_q.put(f"[{target_lang_code.upper()} ({latency:.2f}s)] {translation}")
+                    # Basic filtering for common unwanted additions (can be expanded)
+                    if "(translation from" in translation.lower():
+                        gui_q.put(f"[{thread_name}] Warning: Filtered out potential explanation from translation.")
+                        translation = translation.split("\n")[0].strip() # Try taking only the first line
+
+                    # Remove common parenthetical notes (adjust regex if needed)
+                    import re
+                    translation = re.sub(r'\s*\([^)]*\)$', '', translation).strip()
+
+                    # Check again if anything remains after filtering
+                    if translation:
+                         gui_q.put(f"[{target_lang_code.upper()} ({latency:.2f}s)] {translation}")
+                    elif len(text_to_translate.strip()) > 2:
+                         gui_q.put(f"[{thread_name}] Warning: Translation became empty after filtering: '{response['response'].strip()[:50]}...'")
+
                 else:
                      if len(text_to_translate.strip()) > 2:
                           gui_q.put(f"[{thread_name}] Warning: Empty translation response from LLM for input: '{text_to_translate[:50]}...'")
