@@ -183,54 +183,61 @@ def transcribe_thread(audio_q, transcribed_q, gui_q):
         gui_q.put(None) # Signal GUI
 
 
+# Find this function in your script:
 def translate_thread(transcribed_q, gui_q, target_lang_code):
     """ Translates text from (lang, text) tuple to target_lang_code, puts results in gui_q """
     thread_name = threading.current_thread().name
-    gui_q.put(f"[{thread_name}] Initializing Ollama client (Model: {OLLAMA_MODEL}, Target Lang: {target_lang_code})...")
+    # Ensure target_lang_code has a value for the initial message
+    initial_target_display = target_lang_code if target_lang_code else "N/A"
+    gui_q.put(f"[{thread_name}] Initializing Ollama client (Model: {OLLAMA_MODEL}, Target Lang: {initial_target_display})...")
     try:
-        ollama.list() # Ping Ollama server
+        ollama.list()
         gui_q.put(f"[{thread_name}] Ollama connection successful. Waiting for text...")
     except Exception as e:
         gui_q.put(f"[{thread_name}] CRITICAL ERROR: Ollama connection failed: {e}")
-        gui_q.put(None) # Signal GUI about critical failure
-        return # Exit thread
+        gui_q.put(None)
+        return
 
     while True:
         data = transcribed_q.get()
         if data is None:
-            break # End signal from upstream
+            break
 
         source_lang_code, text_to_translate = data
+        # Ensure we have a valid target language code before proceeding
+        if not target_lang_code:
+             gui_q.put(f"[{thread_name}] Error: No target language selected for translation.")
+             transcribed_q.task_done() # Mark task done even if skipping
+             continue
 
         try:
             if text_to_translate:
                 start_time = time.time()
 
-                # Dynamic Prompt Construction:
-                # Simple version - works well with good multilingual models like Mistral
-                prompt = f"Translate the following text accurately to {target_lang_code}:\n\n{text_to_translate}"
-
-                # More explicit version (uncomment if needed for your model):
-                # prompt = f"Translate the following text accurately from {source_lang_code} to {target_lang_code}:\n\n{source_lang_code}: {text_to_translate}\n\n{target_lang_code}:"
+                # *** MODIFICATION HERE: Stricter Prompt ***
+                # Instruct the model to ONLY output the translation.
+                prompt = f"Translate the following text into {target_lang_code}. Provide ONLY the translated text as the output. Do not include any explanations, commentary, source language notes, or introductory phrases.\n\nSource Text ({source_lang_code}): {text_to_translate}\n\n{target_lang_code} Translation:"
+                # ******************************************
 
                 response = ollama.generate(model=OLLAMA_MODEL,
                                            prompt=prompt,
                                            stream=False
-                                           # You might add options here if needed, e.g.:
-                                           # options={"temperature": 0.7}
+                                           # options={"temperature": 0.7} # Adjust temp if needed
                                            )
                 translation = response['response'].strip()
                 latency = time.time() - start_time
 
                 if translation:
-                    # Send final translation to GUI with target language code
                     gui_q.put(f"[{target_lang_code.upper()} ({latency:.2f}s)] {translation}")
                 else:
-                     gui_q.put(f"[{thread_name}] Warning: Empty translation response from LLM for input: '{text_to_translate[:50]}...'")
+                     # Check if original text was maybe just punctuation/short
+                     if len(text_to_translate.strip()) > 2:
+                          gui_q.put(f"[{thread_name}] Warning: Empty translation response from LLM for input: '{text_to_translate[:50]}...'")
 
         except Exception as e:
             gui_q.put(f"[{thread_name}] Translation error: {e}")
         finally:
+            # Ensure task_done is always called for the queue item
             transcribed_q.task_done()
 
     gui_q.put(f"[{thread_name}] Translation thread finished.")
