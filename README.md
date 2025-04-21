@@ -8,3 +8,16 @@ There are two versions:
 
 The ollama version needs you to install Ollama from their website first and have it running in the background before launching the program.
 You then need to "pull" the model "llama3". you can do so by opening terminal or power script and typing "ollama pull llama3".
+
+----- To install -----
+
+This uses your desktop audio channel to live translate using whisper. Only translates to english.
+
+To unpackage the files:
+
+1. Download ALL parts (.001, .002, ...).
+2. Have a tool like 7-Zip installed.
+3. Put all the downloaded parts in the same folder.
+4. Right-click on the first file (.001) and choose 7-Zip -> Extract Here or Extract files.... 7-Zip will automatically find the other parts and reassemble the original file.
+
+If you cannot find the 7zip in the right click menu select shop more options at the bottom.
