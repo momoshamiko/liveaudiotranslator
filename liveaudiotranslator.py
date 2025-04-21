@@ -25,6 +25,15 @@ AUDIO_FORMAT = pyaudio.paInt16 # PyAudio format constant
 AUDIO_BUFFER_SECONDS = 3 # Process audio in chunks of this duration (Adjust if needed)
 PYAUDIO_FRAMES_PER_BUFFER = 1024 # How many frames PyAudio reads at a time
 
+#Phrases the ai translates too often in error
+PHRASES_TO_IGNORE = [
+    "thanks for watching",
+    "thank you for watching",
+    "thank you for your viewing",
+    "thank you very much for watching until the end",
+    # Add other similar variations if you notice them
+]
+
 # --- Appearance & History Settings ---
 HISTORY_MINUTES = 3       # How many minutes of translation history to keep
 WINDOW_ALPHA = 0.85       # Window transparency (0.0=invisible to 1.0=opaque)
@@ -127,7 +136,7 @@ def capture_audio_thread_gui(device_index, audio_q, gui_q, stop_event_flag):
 
 
 def transcribe_translate_thread_gui(audio_q, gui_q, stop_event_flag):
-    """ Transcribes audio using Whisper model and translates directly to English. """
+    """ Transcribes audio using Whisper model and translates directly to English, filtering unwanted phrases. """
     thread_name = threading.current_thread().name
     gui_q.put(f"[{thread_name}] Initializing Whisper model ({WHISPER_MODEL_SIZE})...")
     model = None
@@ -150,7 +159,7 @@ def transcribe_translate_thread_gui(audio_q, gui_q, stop_event_flag):
                 if audio_np.size > 0:
                     start_time = time.time()
                     segments, info = model.transcribe(
-                        audio_np, beam_size=5, vad_filter=False,
+                        audio_np, beam_size=5, vad_filter=True,
                         vad_parameters=dict(min_silence_duration_ms=500),
                         task='translate' # Directly translate to English
                     )
@@ -161,10 +170,22 @@ def transcribe_translate_thread_gui(audio_q, gui_q, stop_event_flag):
                     full_translation = " ".join(segment.text for segment in segments).strip()
                     latency = time.time() - start_time
 
-                    if full_translation:
+                    # --- >>> MODIFICATION START <<< ---
+                    # Normalize the translation for comparison
+                    normalized_translation = full_translation.lower().strip().rstrip('.?!')
+
+                    # Check if the normalized translation is in the ignore list
+                    should_ignore = normalized_translation in PHRASES_TO_IGNORE
+
+                    if full_translation and not should_ignore: # Only queue if not empty AND not ignored
                          # Send translation for history deque
                         gui_q.put(f"[EN ({latency:.2f}s, src={detected_lang}:{detected_prob:.2f})] {full_translation}")
+                    elif should_ignore:
+                        # Optional: Log that a phrase was ignored (can be noisy)
+                        # print(f"Ignoring phrase: '{full_translation}'")
+                        pass # Just don't queue it
                     # else: VAD might have filtered, or no speech detected
+                    # --- >>> MODIFICATION END <<< ---
 
             except Exception as e:
                 gui_q.put(f"[{thread_name}] ERROR during translation: {e}")
