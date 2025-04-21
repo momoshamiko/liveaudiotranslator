@@ -7,3 +7,4 @@ There are two versions:
 2. liveaudiotranslator_llama_multi - this one uses your desktop audio plus Ollama to translate, can be used to translate to any language.
 
 The ollama version needs you to install Ollama from their website first and have it running in the background before launching the program.
+You then need to "pull" the model "llama3". you can do so by opening terminal or power script and typing "ollama pull llama3".
