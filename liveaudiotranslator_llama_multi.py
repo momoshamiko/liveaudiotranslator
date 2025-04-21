@@ -20,7 +20,7 @@ SUPPORTED_TARGET_LANGUAGES = {
     "Indonesian": "id",
     "Russian": "ru",
     "Korean": "ko",
-    # "Japanese": "ja", # Maybe less useful if source is often JP
+    "Japanese": "ja",
     "Spanish": "es",
     "French": "fr",
     "German": "de",
@@ -34,7 +34,16 @@ WHISPER_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 WHISPER_COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "default" # or: int8_float16, int8, float32
 
 # Ollama settings
-OLLAMA_MODEL = 'mistral' # Ensure this model is pulled in Ollama
+OLLAMA_MODEL = 'llama3' # Ensure this model is pulled in Ollama
+
+#Phrases the ai translates too often in error
+PHRASES_TO_IGNORE = [
+    "thanks for watching",
+    "thank you for watching",
+    "thank you for your viewing",
+    "thank you very much for watching until the end",
+    # Add other similar variations if you notice them
+]
 
 # Audio settings
 AUDIO_SAMPLERATE = 16000 # Whisper requires 16kHz
@@ -193,7 +202,7 @@ def transcribe_thread_gui(audio_q, transcribed_q, gui_q, stop_event_flag):
         # Don't signal GUI end here
 
 def translate_thread_gui(transcribed_q, gui_q, target_lang_code, stop_event_flag):
-    """ Translates text using Ollama, puts results on gui_q, checks stop_event. """
+    """ Translates text using Ollama, puts results on gui_q, filtering unwanted phrases, checks stop_event. """
     thread_name = threading.current_thread().name
     gui_q.put(f"[{thread_name}] Initializing Ollama client (Model: {OLLAMA_MODEL}, Target: {target_lang_code})...")
     try:
@@ -221,7 +230,7 @@ def translate_thread_gui(transcribed_q, gui_q, target_lang_code, stop_event_flag
             if text_to_translate:
                 start_time = time.time()
                 # Using the strict prompt from the original script
-                context_info = "Context: The text is dialogue from a Japanese Hololive VTuber live stream."
+                context_info = "Context: The text is dialogue from a video live stream." # You might want to make this more generic if used for other sources
                 instruction = f"Translate the following Source Text into {target_lang_code}. IMPORTANT: Your entire response must consist ONLY of the raw translated text in {target_lang_code} and absolutely nothing else. Do not add explanations, commentary, notes, labels, source language text, or translations into other languages."
                 prompt = f"{context_info}\n\n{instruction}\n\nSource Text ({source_lang_code}): {text_to_translate}\n\n{target_lang_code} Translation:"
 
@@ -231,18 +240,34 @@ def translate_thread_gui(transcribed_q, gui_q, target_lang_code, stop_event_flag
                 latency = time.time() - start_time
 
                 if translation:
-                    # Basic filtering (can be enhanced)
+                    # Basic filtering (can be enhanced) - Keep your existing filters too
                     if "(translation from" in translation.lower():
                         gui_q.put(f"[{thread_name}] Warning: Filtered out potential explanation.")
                         translation = translation.split("\n")[0].strip()
                     import re
-                    translation = re.sub(r'\s*\([^)]*\)$', '', translation).strip()
+                    translation = re.sub(r'\s*\([^)]*\)$', '', translation).strip() # Filter trailing parentheticals
 
-                    if translation:
+                    # --- >>> MODIFICATION START <<< ---
+                    # Normalize the translation for comparison
+                    normalized_translation = translation.lower().strip().rstrip('.?!')
+
+                    # Check if the normalized translation is in the ignore list
+                    should_ignore = normalized_translation in PHRASES_TO_IGNORE
+                    # --- >>> MODIFICATION END <<< ---
+
+
+                    # --- >>> MODIFICATION: Check should_ignore flag <<< ---
+                    if translation and not should_ignore: # Only queue if not empty AND not ignored
                         # Send translation for history deque, using target lang code prefix
                         gui_q.put(f"[{target_lang_code.upper()} ({latency:.2f}s)] {translation}")
-                    elif len(text_to_translate.strip()) > 2: # Check length to avoid logging noise
+                    elif should_ignore:
+                         # Optional: Log ignored phrase
+                         # print(f"Ignoring Ollama phrase: '{translation}'")
+                         pass # Just don't queue it
+                    elif len(text_to_translate.strip()) > 2: # Check length to avoid logging noise from filtering
                          gui_q.put(f"[{thread_name}] Warning: Translation empty after filtering.")
+                    # --- >>> MODIFICATION END <<< ---
+
                 elif len(text_to_translate.strip()) > 2:
                     gui_q.put(f"[{thread_name}] Warning: Empty translation response from LLM.")
         except Exception as e:
