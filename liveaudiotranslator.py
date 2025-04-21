@@ -16,7 +16,7 @@ from tkinter import ttk, scrolledtext, messagebox, font # Added font for default
 # Whisper settings
 WHISPER_MODEL_SIZE = "medium" # tiny, base, small, medium, large-v2, large-v3
 WHISPER_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-WHISPER_COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "default" # or: int8_float16, int8, float32
+WHISPER_COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "float32" # Explicitly use float32 on CPU
 
 # Audio settings
 AUDIO_SAMPLERATE = 16000 # Whisper requires 16kHz
@@ -29,6 +29,7 @@ PYAUDIO_FRAMES_PER_BUFFER = 1024 # How many frames PyAudio reads at a time
 PHRASES_TO_IGNORE = [
     "thanks for watching",
     "thank you for watching",
+    "thank you for watching!",
     "thank you for your viewing",
     "thank you very much for watching until the end",
     # Add other similar variations if you notice them
@@ -159,7 +160,7 @@ def transcribe_translate_thread_gui(audio_q, gui_q, stop_event_flag):
                 if audio_np.size > 0:
                     start_time = time.time()
                     segments, info = model.transcribe(
-                        audio_np, beam_size=5, vad_filter=True,
+                        audio_np, beam_size=5, vad_filter=False,
                         vad_parameters=dict(min_silence_duration_ms=500),
                         task='translate' # Directly translate to English
                     )
