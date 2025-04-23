@@ -11,10 +11,11 @@ import torch
 from faster_whisper import WhisperModel
 import pyaudio # Added dependency
 import re # For ignore patterns
+import sys
 
 import tkinter as tk
 from tkinter import ttk, messagebox, font # Removed scrolledtext as it's replaced
-import tkinter.font as tkFont # Import font module
+from tkinter import font as tkFont
 
 # --- Configuration ---
 
@@ -111,38 +112,62 @@ class SubtitleOverlay:
     def __init__(self):
         self.root = tk.Toplevel()
         self.root.title("Subtitles")
-        self.root.overrideredirect(True)
+        self.root.overrideredirect(True) # Remove window decorations
+
+        # --- Standard Topmost Attribute ---
+        # Good practice, might suffice on some systems or provide a base level
         self.root.attributes('-topmost', True)
+
+        # --- macOS Specific 'Always on Top' Enhancement ---
+        if sys.platform == "darwin": # Check if the operating system is macOS
+            try:
+                # Tkinter uses Tcl/Tk underneath. We can execute Tcl commands.
+                # '::tk::unsupported::MacWindowStyle' is a Tcl command for macOS specifics.
+                # 'style' is the subcommand to change the window style.
+                # self.root._w gives the Tcl path name of the window widget.
+                # 'floating' sets the window level higher than normal windows.
+                # 'nonactivating' prevents the window from stealing focus when clicked.
+                # Another option instead of 'floating' could be 'utility'.
+                self.root.tk.call('::tk::unsupported::MacWindowStyle', 'style', self.root._w, 'floating', 'nonactivating')
+                print("INFO: Applied macOS specific floating window style for reliable 'Always on Top'.")
+            except tk.TclError as e:
+                # This might fail if the Tcl/Tk version doesn't support it,
+                # or if Apple changes things in future macOS versions.
+                print(f"WARNING: Failed to apply macOS specific floating window style: {e}")
+                print("         The subtitle window might not stay reliably on top of other applications.")
+        # --- End macOS Specific Enhancement ---
+
+
         # self.root.attributes('-alpha', 0.95) # REMOVE -alpha, we use transparentcolor
 
         # --- Canvas Implementation ---
-        self.font_family = "Segoe UI"
+        self.font_family = "Segoe UI" # Consider platform-default fonts later if needed
         self.font_size = 28
         self.font_weight = "bold"
         self.text_color = "white"
         self.background_color = "black" # The color for the stippled rect
-        # How transparent? 'gray12' (faint) 'gray25' (light) 'gray50' (medium)
         self.background_stipple = 'gray25'
         self.padding_x = 10
         self.padding_y = 10
 
-        # Make window background fully transparent (Windows specific)
-        self.transparent_color = 'magenta' # Or '#ff00ff', '#00ff00' etc.
+        # Make window background fully transparent
+        # Using a known color and making it transparent is common
+        self.transparent_color = '#abcdef' # Use an unlikely color
         self.root.config(bg=self.transparent_color)
         try:
+            # This attribute is common on Windows and some X11 setups
             self.root.attributes("-transparentcolor", self.transparent_color)
         except tk.TclError:
-            print("Warning: -transparentcolor attribute not supported, background may not be clear.")
-            # Fallback: Use alpha if transparentcolor fails? Or just have solid background.
-            # For now, just print warning. A solid magenta bg will be obvious if it fails.
-            # self.root.attributes('-alpha', 0.5) # Example fallback
-            # self.root.config(bg='black')
-
+            print("Warning: -transparentcolor attribute not supported on this platform/Tk version.")
+            print("         Falling back to standard -alpha transparency.")
+            # Fallback for systems not supporting -transparentcolor (like older macOS Tk)
+            self.root.attributes('-alpha', 0.75) # Example alpha fallback
+            self.root.config(bg=self.background_color) # Use the desired bg color directly
 
         # Create Canvas instead of Label
         self.canvas = tk.Canvas(
             self.root,
-            bg=self.transparent_color, # Canvas bg must match transparent color
+            bg=self.transparent_color if '-transparentcolor' in self.root.attributes() else self.background_color, # Match canvas bg
             highlightthickness=0 # Remove canvas border
         )
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -150,6 +175,7 @@ class SubtitleOverlay:
         # Store IDs of canvas items to update/delete them later
         self._text_item = None
         self._rect_item = None
+        # Use tkFont (the imported module alias)
         self._text_font = tkFont.Font(family=self.font_family, size=self.font_size, weight=self.font_weight)
 
 
@@ -158,7 +184,9 @@ class SubtitleOverlay:
         screen_height = self.root.winfo_screenheight()
         # Adjust height slightly maybe based on font/padding
         self.window_height = self.font_size + (self.padding_y * 4) # Estimate height
-        self.root.geometry(f"{screen_width}x{self.window_height}+0+{screen_height - (self.window_height + 20)}") # Adjust vertical offset too
+        # Position near bottom-center
+        initial_y = screen_height - (self.window_height + 40) # 40 pixels from bottom
+        self.root.geometry(f"{screen_width}x{self.window_height}+0+{initial_y}")
 
         # Bind resize event to redraw (optional, but good practice)
         self.canvas.bind("<Configure>", self._redraw_canvas)
@@ -166,39 +194,39 @@ class SubtitleOverlay:
         # Initial clear draw
         self.clear_text()
 
+    # --- Make sure the _redraw_canvas correctly handles the potential fallback alpha case ---
     def _redraw_canvas(self, event=None):
         """Redraws canvas items when window is resized or text updated."""
         if not hasattr(self, 'canvas') or not self.canvas.winfo_exists():
             return
 
-        # Get current canvas size
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
 
-        # Delete previous items
-        if self._rect_item:
-            self.canvas.delete(self._rect_item)
-            self._rect_item = None
-        if self._text_item:
-            self.canvas.delete(self._text_item)
-            self._text_item = None
+        if self._rect_item: self.canvas.delete(self._rect_item); self._rect_item = None
+        if self._text_item: self.canvas.delete(self._text_item); self._text_item = None
 
-        # Draw background rectangle ONLY if there's text to display? Or always?
-        # Let's draw it if there is text, otherwise just clear.
         current_text = getattr(self, '_current_text', '')
         if current_text:
-            # Draw semi-transparent background rectangle
-            self._rect_item = self.canvas.create_rectangle(
-                0, 0, width, height,
-                fill=self.background_color,
-                stipple=self.background_stipple,
-                outline="" # No border on the rectangle itself
-            )
+            # Determine if we are using true transparency or alpha fallback
+            using_transparent_color = '-transparentcolor' in self.root.attributes()
+
+            if using_transparent_color:
+                # Draw semi-transparent background rectangle using stipple
+                self._rect_item = self.canvas.create_rectangle(
+                    0, 0, width, height,
+                    fill=self.background_color,
+                    stipple=self.background_stipple,
+                    outline="" # No border on the rectangle itself
+                )
+            else:
+                # If using alpha fallback, the canvas background IS the background color.
+                # No need to draw a separate rectangle.
+                pass # Canvas bg handles it
 
             # Draw text on top, centered
             self._text_item = self.canvas.create_text(
-                width / 2, # Center X
-                height / 2, # Center Y
+                width / 2, height / 2,
                 text=current_text,
                 font=self._text_font,
                 fill=self.text_color,
@@ -206,8 +234,7 @@ class SubtitleOverlay:
                 width=width - (self.padding_x * 2) # Add wrapping width
             )
         else:
-            # If no text, ensure items are deleted (handled above)
-             pass
+             pass # Items deleted above
 
         self.root.update_idletasks()
 
@@ -224,7 +251,14 @@ class SubtitleOverlay:
 
     def close(self):
         """Destroys the overlay window."""
-        self.root.destroy()
+        # Add extra checks for safety
+        if hasattr(self, 'root') and self.root and self.root.winfo_exists():
+             try:
+                 self.root.destroy()
+             except tk.TclError as e:
+                 print(f"Info: TclError closing subtitle overlay (already closed?): {e}")
+        self.root = None # Ensure reference is cleared
+        self.canvas = None
 
 # --- Thread Functions (Adapted for PyAudio, Whisper Translate, GUI Queue, Stop Event) ---
 
