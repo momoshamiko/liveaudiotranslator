@@ -263,15 +263,12 @@ def transcribe_translate_thread_gui(audio_q, gui_q, stop_event_flag, model_size,
 
 # --- Tkinter GUI Application (Adding Language and Model Selection) ---
 
-# --- Tkinter GUI Application (Adding Language and Model Selection) ---
-
 class TranslatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Live Audio Translator (Whisper)")
         # Adjusted geometry slightly for the new slider
         self.root.geometry("920x400")
-        self.threads_completed = 0  # Track finished threads
 
         # --- Dark Theme Configuration ---
         self.root.config(bg=DARK_BG)
