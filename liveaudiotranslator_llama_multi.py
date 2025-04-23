@@ -685,8 +685,6 @@ class TranslatorApp:
         print(f"stop_translation: Resetting active threads list and status shown flag.")
         self.active_threads = []
         self.initial_status_shown = False
-        # Reset threads_completed here as well for robustness
-        self.threads_completed = 0
 
         print(f"--- EXITING stop_translation (source: {call_source}) ---\n")
 
