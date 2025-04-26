@@ -1,16 +1,21 @@
 import queue
+import os
 import threading
 import sys
 import time
+import datetime
 from collections import deque
 import numpy as np
+import tkinter as tk
 import torch
 from faster_whisper import WhisperModel
 import pyaudio # Added dependency
 import re # For ignore patterns
+import sys
 
 import tkinter as tk
 from tkinter import ttk, messagebox, font # Removed scrolledtext as it's replaced
+from tkinter import font as tkFont
 
 # --- Configuration ---
 
@@ -31,13 +36,12 @@ SUPPORTED_SOURCE_LANGUAGES = {
 }
 DEFAULT_SOURCE_LANG = "Auto Detect"
 
-SUPPORTED_MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"] # large-v2 removed for simplicity, add if needed
-DEFAULT_MODEL_SIZE = "medium" # Default to small for broader compatibility
-# --- END MODIFICATION ---
+SUPPORTED_MODEL_SIZES = ["small", "medium", "large-v2", "large-v3"] # large-v2 removed for simplicity, add if needed
+DEFAULT_MODEL_SIZE = "large-v3"
+
 
 
 # Whisper settings
-# WHISPER_MODEL_SIZE = "medium" # <-- REMOVED global constant
 WHISPER_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 WHISPER_COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "float32" # Explicitly use float32 on CPU
 
@@ -57,7 +61,7 @@ IGNORE_PATTERNS = [
 
 # --- Appearance & History Settings ---
 MAX_HISTORY_MESSAGES = 10 # Change to what you want
-WINDOW_ALPHA = 0.60      # Window transparency (0.0=invisible to 1.0=opaque)
+WINDOW_ALPHA = 1.00      # Window transparency (0.0=invisible to 1.0=opaque)
 
 # --- Color Constants for Dark Theme ---
 DEFAULT_FONT_SIZE = 14    # Default font size for output
@@ -101,6 +105,159 @@ def get_audio_devices():
     finally:
         p.terminate()
     return devices
+
+#--------- Overlay Bar ----------#
+class SubtitleOverlay:
+    def __init__(self):
+        self.root = tk.Toplevel()
+        self.root.title("Subtitles")
+        self.root.overrideredirect(True) # Remove window decorations
+
+        # --- Standard Topmost Attribute ---
+        # Good practice, might suffice on some systems or provide a base level
+        self.root.attributes('-topmost', True)
+
+        # --- macOS Specific 'Always on Top' Enhancement ---
+        if sys.platform == "darwin": # Check if the operating system is macOS
+            try:
+                # Tkinter uses Tcl/Tk underneath. We can execute Tcl commands.
+                # '::tk::unsupported::MacWindowStyle' is a Tcl command for macOS specifics.
+                # 'style' is the subcommand to change the window style.
+                # self.root._w gives the Tcl path name of the window widget.
+                # 'floating' sets the window level higher than normal windows.
+                # 'nonactivating' prevents the window from stealing focus when clicked.
+                # Another option instead of 'floating' could be 'utility'.
+                self.root.tk.call('::tk::unsupported::MacWindowStyle', 'style', self.root._w, 'floating', 'nonactivating')
+                print("INFO: Applied macOS specific floating window style for reliable 'Always on Top'.")
+            except tk.TclError as e:
+                # This might fail if the Tcl/Tk version doesn't support it,
+                # or if Apple changes things in future macOS versions.
+                print(f"WARNING: Failed to apply macOS specific floating window style: {e}")
+                print("         The subtitle window might not stay reliably on top of other applications.")
+        # --- End macOS Specific Enhancement ---
+
+
+        # self.root.attributes('-alpha', 0.95) # REMOVE -alpha, we use transparentcolor
+
+        # --- Canvas Implementation ---
+        self.font_family = "Segoe UI" # Consider platform-default fonts later if needed
+        self.font_size = 28
+        self.font_weight = "bold"
+        self.text_color = "white"
+        self.background_color = "black" # The color for the stippled rect
+        self.background_stipple = 'gray25'
+        self.padding_x = 10
+        self.padding_y = 10
+
+        # Make window background fully transparent
+        # Using a known color and making it transparent is common
+        self.transparent_color = '#abcdef' # Use an unlikely color
+        self.root.config(bg=self.transparent_color)
+        try:
+            # This attribute is common on Windows and some X11 setups
+            self.root.attributes("-transparentcolor", self.transparent_color)
+        except tk.TclError:
+            print("Warning: -transparentcolor attribute not supported on this platform/Tk version.")
+            print("         Falling back to standard -alpha transparency.")
+            # Fallback for systems not supporting -transparentcolor (like older macOS Tk)
+            self.root.attributes('-alpha', 0.75) # Example alpha fallback
+            self.root.config(bg=self.background_color) # Use the desired bg color directly
+
+        # Create Canvas instead of Label
+        self.canvas = tk.Canvas(
+            self.root,
+            bg=self.transparent_color if '-transparentcolor' in self.root.attributes() else self.background_color, # Match canvas bg
+            highlightthickness=0 # Remove canvas border
+        )
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Store IDs of canvas items to update/delete them later
+        self._text_item = None
+        self._rect_item = None
+        # Use tkFont (the imported module alias)
+        self._text_font = tkFont.Font(family=self.font_family, size=self.font_size, weight=self.font_weight)
+
+
+        # Calculate initial size and position
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        # Adjust height slightly maybe based on font/padding
+        self.window_height = self.font_size + (self.padding_y * 4) # Estimate height
+        # Position near bottom-center
+        initial_y = screen_height - (self.window_height + 40) # 40 pixels from bottom
+        self.root.geometry(f"{screen_width}x{self.window_height}+0+{initial_y}")
+
+        # Bind resize event to redraw (optional, but good practice)
+        self.canvas.bind("<Configure>", self._redraw_canvas)
+
+        # Initial clear draw
+        self.clear_text()
+
+    # --- Make sure the _redraw_canvas correctly handles the potential fallback alpha case ---
+    def _redraw_canvas(self, event=None):
+        """Redraws canvas items when window is resized or text updated."""
+        if not hasattr(self, 'canvas') or not self.canvas.winfo_exists():
+            return
+
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+
+        if self._rect_item: self.canvas.delete(self._rect_item); self._rect_item = None
+        if self._text_item: self.canvas.delete(self._text_item); self._text_item = None
+
+        current_text = getattr(self, '_current_text', '')
+        if current_text:
+            # Determine if we are using true transparency or alpha fallback
+            using_transparent_color = '-transparentcolor' in self.root.attributes()
+
+            if using_transparent_color:
+                # Draw semi-transparent background rectangle using stipple
+                self._rect_item = self.canvas.create_rectangle(
+                    0, 0, width, height,
+                    fill=self.background_color,
+                    stipple=self.background_stipple,
+                    outline="" # No border on the rectangle itself
+                )
+            else:
+                # If using alpha fallback, the canvas background IS the background color.
+                # No need to draw a separate rectangle.
+                pass # Canvas bg handles it
+
+            # Draw text on top, centered
+            self._text_item = self.canvas.create_text(
+                width / 2, height / 2,
+                text=current_text,
+                font=self._text_font,
+                fill=self.text_color,
+                justify="center",
+                width=width - (self.padding_x * 2) # Add wrapping width
+            )
+        else:
+             pass # Items deleted above
+
+        self.root.update_idletasks()
+
+
+    def update_text(self, text):
+        """Updates the text displayed on the canvas."""
+        self._current_text = text.strip() # Store the text
+        self._redraw_canvas() # Trigger redraw
+
+    def clear_text(self):
+        """Clears the text and background rectangle."""
+        self._current_text = "" # Clear stored text
+        self._redraw_canvas() # Trigger redraw (which will clear items)
+
+    def close(self):
+        """Destroys the overlay window."""
+        # Add extra checks for safety
+        if hasattr(self, 'root') and self.root and self.root.winfo_exists():
+             try:
+                 self.root.destroy()
+             except tk.TclError as e:
+                 print(f"Info: TclError closing subtitle overlay (already closed?): {e}")
+        self.root = None # Ensure reference is cleared
+        self.canvas = None
 
 # --- Thread Functions (Adapted for PyAudio, Whisper Translate, GUI Queue, Stop Event) ---
 
@@ -147,16 +304,30 @@ def capture_audio_thread_gui(device_index, audio_q, gui_q, stop_event_flag):
     except ValueError as e: gui_q.put(f"[{thread_name}] CRITICAL ERROR: Device config error: {e}")
     except Exception as e: gui_q.put(f"[{thread_name}] CRITICAL ERROR: Initializing/running PyAudio: {e}")
     finally:
+        print(f"[{thread_name}] Entering finally block...") # <<< Keep
         gui_q.put(f"[{thread_name}] Cleaning up audio resources...")
         if stream is not None:
             try:
-                if stream.is_active(): stream.stop_stream()
-                stream.close(); gui_q.put(f"[{thread_name}] Audio stream closed.")
-            except Exception as e: gui_q.put(f"[{thread_name}] Warning: Error closing stream: {e}")
-        if p is not None: p.terminate(); gui_q.put(f"[{thread_name}] PyAudio terminated.")
+                # --- START CHANGE ---
+                # print(f"[{thread_name}] Stopping stream...")       # <<< COMMENT OUT
+                # if stream.is_active(): stream.stop_stream()      # <<< COMMENT OUT
+                # print(f"[{thread_name}] Closing stream...")       # <<< COMMENT OUT
+                # stream.close();                                  # <<< COMMENT OUT
+                print(f"[{thread_name}] Skipping explicit stream stop/close...") # <<< ADDED
+                # --- END CHANGE ---
+                gui_q.put(f"[{thread_name}] Audio stream will be closed by PyAudio terminate.") # Edited msg
+                # print(f"[{thread_name}] Stream closed.")          # <<< COMMENT OUT
+            except Exception as e: gui_q.put(f"[{thread_name}] Warning: Error during implicit stream close via terminate: {e}") # Edited msg
+        if p is not None:
+            print(f"[{thread_name}] Terminating PyAudio...") # <<< Keep
+            p.terminate(); gui_q.put(f"[{thread_name}] PyAudio terminated.")
+            print(f"[{thread_name}] PyAudio terminated.") # <<< Keep
         # Signal end by putting None in the *next* queue (audio_queue)
+        print(f"[{thread_name}] Putting None in audio_queue...") # <<< Keep
         audio_q.put(None)
+        print(f"[{thread_name}] Putting status msg in gui_queue...") # <<< Keep
         gui_q.put(f"[{thread_name}] Audio capture thread finished.")
+        print(f"[{thread_name}] Exiting finally block.") # <<< Keep
 
 
 # --- MODIFICATION: Added model_size and source_language_code arguments ---
@@ -201,7 +372,7 @@ def transcribe_translate_thread_gui(audio_q, gui_q, stop_event_flag, model_size,
                         audio_np,
                         language=source_language_code, # Pass selected language code (or None)
                         beam_size=5, # Adjust beam size as needed
-                        vad_filter=False, # VAD filter can sometimes cut off speech; disable if unsure
+                        vad_filter=True, # VAD filter can sometimes cut off speech; disable if unsure
                         task='translate' # Force translation to English
                     )
                     # --- END MODIFICATION ---
@@ -244,21 +415,39 @@ def transcribe_translate_thread_gui(audio_q, gui_q, stop_event_flag, model_size,
         # --- MODIFICATION: Include model_size in critical error message ---
         gui_q.put(f"[{thread_name}] CRITICAL ERROR: Failed to load/run Whisper model '{model_size}': {e}")
     finally:
+        print(f"[{thread_name}] Entering finally block...") # <<< Keep
         # --- Cleanup ---
         if model is not None:
             try:
-                gui_q.put(f"[{thread_name}] Releasing Whisper model resources...")
-                # For faster-whisper, explicit deletion helps trigger GC
-                del model
-                if WHISPER_DEVICE == 'cuda':
-                    torch.cuda.empty_cache() # Clear CUDA cache if applicable
-                gui_q.put(f"[{thread_name}] Whisper model resources released.")
+                gui_q.put(f"[{thread_name}] Releasing Whisper model resources (Implicitly)...") # Edited msg
+                print(f"[{thread_name}] Skipping explicit 'del model'...") # <<< ADDED
+
+                # --- START CHANGE ---
+                # print(f"[{thread_name}] Adding short delay before model deletion...") # Keep commented
+                # time.sleep(0.1) # Keep commented
+
+                # Explicitly delete model object - REMOVED / COMMENTED OUT
+                # del model                                            # <<< COMMENT OUT / DELETE
+                # print(f"[{thread_name}] Model object deleted.")       # <<< COMMENT OUT / DELETE
+                # --- END CHANGE ---
+
+
+                # Keep the CUDA cache clear commented out for now
+                # if WHISPER_DEVICE == 'cuda':
+                #    ...
+
+                # Note: Resource release message might be slightly less accurate now,
+                # as cleanup happens later via garbage collection.
+                gui_q.put(f"[{thread_name}] Whisper model resources will be released by GC.") # Edited msg
             except Exception as e:
-                gui_q.put(f"[{thread_name}] Warning: Error releasing model resources: {e}")
+                gui_q.put(f"[{thread_name}] Warning: Error during implicit model resource release setup: {e}") # Edited msg
 
         # Signal that this thread is finished by putting None in the GUI queue
+        print(f"[{thread_name}] Putting status msg in gui_queue...") # <<< Keep
         gui_q.put(f"[{thread_name}] Transcription/Translation thread finished.")
+        print(f"[{thread_name}] Putting None in gui_queue...") # <<< Keep
         gui_q.put(None) # Signal GUI that this processing pipeline is done
+        print(f"[{thread_name}] Exiting finally block.") # <<< Keep
 
 
 # --- Tkinter GUI Application (Adding Language and Model Selection) ---
@@ -303,6 +492,14 @@ class TranslatorApp:
         self.is_running = False
         self.active_threads = []
         self.message_deque = deque()
+        self.enable_overlay = tk.BooleanVar(value=True)
+        self.enable_logging = tk.BooleanVar(value=False)
+        self.subtitle_overlay = None
+        self.log_file_path = self._create_log_file()
+        checkbox_frame = ttk.Frame(root); checkbox_frame.pack()
+        ttk.Checkbutton(checkbox_frame, text="Show Subtitles", variable=self.enable_overlay).pack(side=tk.LEFT, padx=10)
+        ttk.Checkbutton(checkbox_frame, text="Save Log", variable=self.enable_logging).pack(side=tk.LEFT)
+        self.log_file_path = self._create_log_file()
         self.initial_status_shown = False
         # This version has 2 processing threads (Capture + TranscribeTranslate)
         self.expected_threads = 2
@@ -388,6 +585,13 @@ class TranslatorApp:
         # Initialize font object cache
         self._output_font = font.Font(font=self.output_text['font'])
 
+    def _create_log_file(self):
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"log_{timestamp}.txt"
+        return os.path.join(log_dir, filename)
+
     # --- App Methods ---
 
     # --- update_alpha method --- <<<< ADDED
@@ -414,12 +618,27 @@ class TranslatorApp:
         try:
             is_scrolled_to_bottom = self.output_text.yview()[1] >= 0.99
             self.output_text.config(state=tk.NORMAL)
-            if tag: self.output_text.insert(tk.END, text + "\n", tag)
-            else: self.output_text.insert(tk.END, text + "\n")
+            if tag:
+                self.output_text.insert(tk.END, text + "\n", tag)
+            else:
+                self.output_text.insert(tk.END, text + "\n")
             self.output_text.config(state=tk.DISABLED)
-            if is_scrolled_to_bottom: self.output_text.see(tk.END)
-        except tk.TclError as e: print(f"Error adding text to GUI (Tcl): {e}")
-        except Exception as e: print(f"Error adding text to GUI: {e}")
+            if is_scrolled_to_bottom:
+                self.output_text.see(tk.END)
+
+            # NEW: Update subtitle overlay
+            if self.enable_overlay.get():
+                clean_text = text.split("] ", 1)[-1] if "] " in text else text
+                if self.enable_overlay.get() and self.subtitle_overlay:
+                    self.subtitle_overlay.update_text(clean_text.strip())
+                if self.enable_logging.get():
+                    with open(self.log_file_path, 'a', encoding='utf-8') as f: f.write(clean_text.strip() + "\n")
+
+        except tk.TclError as e:
+            print(f"Error adding text to GUI (Tcl): {e}")
+        except Exception as e:
+            print(f"Error adding text to GUI: {e}")
+
 
     def update_output_display(self):
         if not self.root.winfo_exists(): return
@@ -470,6 +689,7 @@ class TranslatorApp:
                             self.status_var.set("Translating...")
                             self.initial_status_shown = False
                         self.message_deque.append((current_time, message))
+                        self.add_output_direct(message, "translation")
                         while len(self.message_deque) > MAX_HISTORY_MESSAGES: self.message_deque.popleft()
                         self.update_output_display()
                     elif "CRITICAL ERROR" in message:
@@ -515,8 +735,17 @@ class TranslatorApp:
                 return
 
         # End of while loop
-        if self.root.winfo_exists() and (self.is_running or self.threads_completed < self.expected_threads):
+        # Only reschedule if we are actively running.
+        # If stop was pressed (is_running=False), threads will finish cleanly
+        # in the background, but we don't need to keep polling the queue.
+        if self.root.winfo_exists() and self.is_running: # <<< MODIFY THIS LINE
              self.root.after(100, self.check_gui_queue)
+        else:
+             # Add this print statement for confirmation when testing
+             if not self.is_running:
+                 print("check_gui_queue: Not rescheduling as is_running is False.")
+             elif not self.root.winfo_exists():
+                  print("check_gui_queue: Not rescheduling as root window doesn't exist.")
 
     def start_translation(self):
         """ Starts the translation process in separate threads """
@@ -531,6 +760,13 @@ class TranslatorApp:
         selected_source_lang_code = SUPPORTED_SOURCE_LANGUAGES.get(selected_source_lang_name)
         if selected_source_lang_name not in SUPPORTED_SOURCE_LANGUAGES: messagebox.showerror("Input Error", f"Invalid source language name: {selected_source_lang_name}"); return
         if not selected_model_size or selected_model_size not in SUPPORTED_MODEL_SIZES: messagebox.showerror("Input Error", "Please select a valid model size."); return
+        if self.enable_overlay.get():
+            if not self.subtitle_overlay:
+                self.subtitle_overlay = SubtitleOverlay()
+            if self.subtitle_overlay: # <-- Add this check
+                self.subtitle_overlay.clear_text()
+            self.root.attributes('-topmost', False)
+
 
         try:
             self.output_text.config(state=tk.NORMAL); self.output_text.delete('1.0', tk.END); self.output_text.config(state=tk.DISABLED)
@@ -557,21 +793,11 @@ class TranslatorApp:
         except Exception as e:
              print(f"CRITICAL ERROR: Failed to start threads: {e}"); self.status_var.set(f"ERROR: Failed to start threads: {e}")
              self.add_output_direct(f"*** CRITICAL ERROR starting threads: {e} ***", "error"); self.stop_translation(error=True)
+             if hasattr(self, 'subtitle_overlay'): self.subtitle_overlay.clear_text()
 
     def stop_translation(self, error=False, graceful_stop=False):
         """ Stops the translation process and resets the GUI state. """
-        if not self.is_running:
-            print("Stop called but already not running. Ensuring UI state.")
-            try:
-                if self.root.winfo_exists():
-                    self.start_button.config(state=self.start_button_state); self.stop_button.config(state=tk.DISABLED)
-                    self.device_combobox.config(state="readonly"); self.source_lang_combobox.config(state="readonly")
-                    self.model_size_combobox.config(state="readonly"); self.font_size_spinbox.config(state="readonly")
-                    current_status = self.status_var.get()
-                    if "error" not in current_status.lower() and "stopped" not in current_status.lower() and "finished" not in current_status.lower(): self.status_var.set("Ready.")
-            except tk.TclError: pass
-            except Exception as e: print(f"Error resetting UI state in stop_translation: {e}")
-            return
+        # ... (keep the initial 'if not self.is_running:' block as is) ...
 
         call_source = "graceful stop" if graceful_stop else ("error stop" if error else "manual stop")
         print(f"Stop signal initiated ({call_source}).")
@@ -580,8 +806,13 @@ class TranslatorApp:
              current_status = self.status_var.get(); status = current_status if "CRITICAL ERROR" in current_status else "Stopped due to CRITICAL ERROR."
              log_status = "Processing stopped due to CRITICAL ERROR."
         elif graceful_stop: status = "Processing finished."; log_status = status
+
+        # --- Set flags FIRST ---
         stop_event.set(); print("Stop event set.")
         self.is_running = False; print("is_running set to False.")
+        self.active_threads = []; self.initial_status_shown = False # Reset thread list early
+
+        # --- NOW wrap the rest in a big try/except ---
         try:
             if self.root.winfo_exists():
                 print("Updating GUI elements to stopped state..."); self.status_var.set(status)
@@ -589,14 +820,40 @@ class TranslatorApp:
                 self.start_button.config(state=self.start_button_state); self.stop_button.config(state=tk.DISABLED)
                 self.device_combobox.config(state="readonly"); self.source_lang_combobox.config(state="readonly")
                 self.model_size_combobox.config(state="readonly"); self.font_size_spinbox.config(state="readonly")
-                self.alpha_slider.config(state=tk.NORMAL) # <<<< Re-enable alpha slider
+                self.alpha_slider.config(state=tk.NORMAL)
                 print("GUI elements updated.")
-            else: print("GUI window closed during stop sequence.")
-        except tk.TclError as e: print(f"Info: TclError updating GUI during stop: {e}")
-        except Exception as e: print(f"Error updating GUI elements in stop_translation: {e}")
-        self._clear_queues(clear_gui=True)
-        self.active_threads = []; self.initial_status_shown = False
-        self.threads_completed = 0 # Reset completion counter here too
+            else:
+                print("GUI window closed during stop sequence.")
+
+            # Clear queues
+            self._clear_queues(clear_gui=True) # Pass clear_gui=True to potentially clear stale GUI messages
+
+            # Close overlay (already has its own try/except inside)
+            try:
+                if self.subtitle_overlay:
+                    self.subtitle_overlay.clear_text()
+                    self.subtitle_overlay.close()
+                    self.subtitle_overlay = None
+            except Exception as e:
+                print(f"Error closing subtitle overlay during stop: {e}")
+
+            # Reset topmost (already has its own try/except inside)
+            try:
+                self.root.attributes('-topmost', True)
+            except tk.TclError as e:
+                 print(f"Info: TclError setting topmost during stop: {e}")
+
+        except tk.TclError as e: # Catch TclErrors specifically if they happen during GUI updates
+             print(f"CRITICAL TCL ERROR during stop_translation cleanup: {e}")
+             # Optionally add a messagebox here if the app survives this point
+             # messagebox.showerror("Stop Error", f"A GUI error occurred during stop: {e}")
+        except Exception as e: # Catch any other unexpected errors
+             print(f"CRITICAL UNEXPECTED ERROR during stop_translation cleanup: {e}")
+             import traceback
+             traceback.print_exc() # Print full traceback to console
+             # Optionally add a messagebox here
+             # messagebox.showerror("Stop Error", f"An unexpected error occurred during stop: {e}")
+
         print("Stop translation method finished.")
 
     def _clear_queues(self, clear_gui=False):
@@ -615,6 +872,7 @@ class TranslatorApp:
             print(f"Cleared approx {cleared_counts[name]} items from {name}_queue.")
 
     def on_closing(self):
+        print(">>> on_closing method entered <<<") # <<< ADD
         print("Close window requested ('X' button).")
         if self.is_running:
             if messagebox.askokcancel("Quit", "Translation is running. Stop and quit?"):
@@ -625,12 +883,17 @@ class TranslatorApp:
         else: print("Not running, destroying root window immediately."); self._destroy_root()
 
     def _destroy_root(self):
+       print(">>> _destroy_root method entered <<<") # <<< ADD
        print("Attempting to destroy root window..."); stop_event.set()
        if self.root and self.root.winfo_exists():
            try: self.root.destroy(); print("Root window destroyed successfully.")
            except tk.TclError as e: print(f"TclError during root destroy (window might already be gone): {e}")
            except Exception as e: print(f"Unexpected error during root destroy: {e}")
        else: print("Root window does not exist or already destroyed.")
+       if self.subtitle_overlay:
+            self.subtitle_overlay.close()
+            self.subtitle_overlay = None
+
 
 # --- End of TranslatorApp Class ---
 
