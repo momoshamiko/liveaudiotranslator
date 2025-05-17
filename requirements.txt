@@ -1,0 +1,20 @@
+# Core dependencies
+torch>=2.3.0
+numpy>=1.26.0
+PyAudio>=0.2.14
+# tkinter is included with Python
+Pillow>=11.0.0
+
+# Whisper engine
+faster-whisper>=1.1.0
+ctranslate2>=4.6.0
+
+# Audio processing
+noisereduce>=3.0.0  # Optional but recommended for better audio quality
+scipy>=1.13.0       # Required by noisereduce
+matplotlib>=3.8.0   # Required by noisereduce
+
+# Optional speech engines (REMOVED)
+# vosk>=0.3.42  # For Vosk engine
+# google-cloud-speech>=2.16.0  # For Google Cloud Speech
+# azure-cognitiveservices-speech>=1.19.0  # For Azure Speech 
